@@ -17,6 +17,7 @@ import logging
 import os
 import subprocess
 import grpc
+import sys
 
 import falcon
 import requests
@@ -146,6 +147,9 @@ class PythonServiceResource:
         # validate model files are in the specified base_path
         if self.validate_model_dir(base_path):
             try:
+                # install custom dependencies, import handlers
+                self._import_custom_modules(model_name)
+
                 tfs_config = tfs_utils.create_tfs_config_individual_model(model_name, base_path)
                 tfs_config_file = "/sagemaker/tfs-config/{}/model-config.cfg".format(model_name)
                 log.info("tensorflow serving model config: \n%s\n", tfs_config)
@@ -216,6 +220,34 @@ class PythonServiceResource:
                                                                                model_name)
             })
 
+
+    def _import_custom_modules(self, model_name):
+        inference_script_path = "/opt/ml/models/{}/model/code/inference.py".format(model_name)
+        requirements_file_path = "/opt/ml/models/{}/model/code/requirements.txt".format(model_name)
+        python_lib_path = "/opt/ml/models/{}/model/code/lib".format(model_name)
+
+        if os.path.exists(requirements_file_path):
+            log.info("pip install dependencies from requirements.txt")
+            pip_install_cmd = "pip3 install -r {}".format(requirements_file_path)
+            try:
+                subprocess.check_call(pip_install_cmd.split())
+            except subprocess.CalledProcessError:
+                log.error('failed to install required packages, exiting.')
+                raise ChildProcessError('failed to install required packages.')
+
+        if os.path.exists(python_lib_path):
+            log.info("add Python code library path")
+            sys.path.append(python_lib_path)
+
+        if os.path.exists(inference_script_path):
+            handler, input_handler, output_handler = self._import_handlers(model_name)
+            model_handlers = self._make_handler(handler, input_handler, output_handler)
+            self.model_handlers[model_name] = model_handlers
+        else:
+            self.model_handlers[model_name] = default_handler
+
+
+
     def _cleanup_config_file(self, config_file):
         if os.path.exists(config_file):
             os.remove(config_file)
@@ -253,8 +285,12 @@ class PythonServiceResource:
 
         try:
             res.status = falcon.HTTP_200
-
-            res.body, res.content_type = self._handlers(data, context)
+            if SAGEMAKER_MULTI_MODEL_ENABLED:
+                with lock():
+                    handlers = self.model_handlers[model_name]
+                    res.body, res.content_type = handlers(data, context)
+            else:
+                res.body, res.content_type = self._handlers(data, context)
         except Exception as e:  # pylint: disable=broad-except
             log.exception("exception handling request: {}".format(e))
             res.status = falcon.HTTP_500
@@ -267,8 +303,10 @@ class PythonServiceResource:
             log.info("Creating grpc channel for port: %s", grpc_port)
             self._channels[grpc_port] = grpc.insecure_channel("localhost:{}".format(grpc_port))
 
-    def _import_handlers(self):
+    def _import_handlers(self, model_name=None):
         inference_script = INFERENCE_SCRIPT_PATH
+        if model_name:
+            inference_script = "/opt/ml/models/{}/model/code/inference.py".format(model_name)
         spec = importlib.util.spec_from_file_location("inference", inference_script)
         inference = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(inference)
