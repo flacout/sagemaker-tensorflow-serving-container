@@ -226,10 +226,12 @@ class ServiceManager(object):
         paginator = client.get_paginator("list_objects")
         for result in paginator.paginate(Bucket=bucket, Delimiter="/", Prefix=prefix):
             for file in result.get("Contents", []):
-                destination = os.path.join(CODE_DIR, file.get("Key"))
-                if not os.path.exists(os.path.dirname(destination)):
-                    os.makedirs(os.path.dirname(destination))
-                resource.meta.client.download_file(bucket, file.get("Key"), destination)
+                if file.get("Size") > 0:  # this is the fix here
+                    destination = os.path.join(CODE_DIR, file.get("Key"))
+                    if not os.path.exists(os.path.dirname(destination)):
+                        os.makedirs(os.path.dirname(destination))
+                    resource.meta.client.download_file(bucket, file.get("Key"), destination)
+
 
     def _create_nginx_tfs_upstream(self):
         indentation = "    "
